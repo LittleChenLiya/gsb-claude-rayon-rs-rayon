@@ -105,6 +105,7 @@ mod test;
 //   can be readily distinguished.
 
 mod blocks;
+mod buckets;
 mod chain;
 mod chunks;
 mod cloned;
@@ -164,6 +165,7 @@ mod zip_eq;
 
 pub use self::{
     blocks::{ExponentialBlocks, UniformBlocks},
+    buckets::PartitionBucketsError,
     chain::Chain,
     chunks::Chunks,
     cloned::Cloned,
@@ -2561,6 +2563,72 @@ pub trait IndexedParallelIterator: ParallelIterator {
         B: Send,
     {
         collect::unzip_into_vecs(self, left, right);
+    }
+
+    /// Partitions the items into `num_buckets` vectors according to the
+    /// `classify` function, which returns the target bucket index in
+    /// `0..num_buckets` for each item.
+    ///
+    /// Unlike a straightforward per-bucket `filter`, this scans the
+    /// iterator only once, and unlike collecting behind a shared lock, items
+    /// are buffered and counted in private per-chunk buffers and scattered
+    /// into their final positions from per-chunk offsets, so there is no
+    /// global lock on the hot path.
+    ///
+    /// The partition is **stable**: items keep their relative order within
+    /// each bucket. The result does not depend on the number of worker
+    /// threads or on the split granularity (see
+    /// [`with_min_len`](IndexedParallelIterator::with_min_len) and
+    /// [`with_max_len`](IndexedParallelIterator::with_max_len)).
+    ///
+    /// The `classify` function is invoked **exactly once** per item, and
+    /// items are moved into the result, so `Self::Item` does not need to
+    /// implement `Clone`.
+    ///
+    /// If `num_buckets` is zero, or `classify` returns an index outside
+    /// `0..num_buckets`, or a capacity computation overflows, an error is
+    /// returned and no partial result is published; every item that was
+    /// already taken from the iterator is dropped exactly once. The same
+    /// ownership guarantee holds if `classify` panics: every item taken
+    /// from the iterator is dropped exactly once, and uninitialized output
+    /// slots are never read.
+    ///
+    /// # Complexity
+    ///
+    /// Given `n` items, `b = num_buckets`, and `k` parallel chunks
+    /// (roughly proportional to the number of worker threads), the work is
+    /// `O(n + b * k)`, dominated by the `n` classification calls,
+    /// and the extra memory usage is `O(n + b * k)`: each item is
+    /// buffered once before being scattered into its bucket.
+    ///
+    /// # Examples
+    ///
+    /// Grouping integers by their remainder modulo three and printing every
+    /// bucket's sequence and count:
+    ///
+    /// ```rust
+    /// use rayon::prelude::*;
+    ///
+    /// let buckets = (0..10)
+    ///     .into_par_iter()
+    ///     .partition_into_buckets(3, |x| x % 3)
+    ///     .unwrap();
+    ///
+    /// for (index, bucket) in buckets.iter().enumerate() {
+    ///     println!("bucket {index}: {bucket:?} ({} items)", bucket.len());
+    /// }
+    ///
+    /// assert_eq!(buckets, vec![vec![0, 3, 6, 9], vec![1, 4, 7], vec![2, 5, 8]]);
+    /// ```
+    fn partition_into_buckets<F>(
+        self,
+        num_buckets: usize,
+        classify: F,
+    ) -> Result<Vec<Vec<Self::Item>>, PartitionBucketsError>
+    where
+        F: Fn(&Self::Item) -> usize + Sync + Send,
+    {
+        buckets::partition_into_buckets(self, num_buckets, classify)
     }
 
     /// Iterates over tuples `(A, B)`, where the items `A` are from
