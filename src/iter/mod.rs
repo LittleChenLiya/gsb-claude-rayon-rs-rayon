@@ -105,6 +105,7 @@ mod test;
 //   can be readily distinguished.
 
 mod blocks;
+mod buckets;
 mod chain;
 mod chunks;
 mod cloned;
@@ -164,6 +165,7 @@ mod zip_eq;
 
 pub use self::{
     blocks::{ExponentialBlocks, UniformBlocks},
+    buckets::BucketError,
     chain::Chain,
     chunks::Chunks,
     cloned::Cloned,
@@ -2561,6 +2563,61 @@ pub trait IndexedParallelIterator: ParallelIterator {
         B: Send,
     {
         collect::unzip_into_vecs(self, left, right);
+    }
+
+    /// Partitions the items of the iterator into `num_buckets` vectors according
+    /// to a classifier function, preserving the original order of the items
+    /// within each bucket (a *stable* partition).
+    ///
+    /// The classifier is called exactly once per item and must return a bucket
+    /// index in `0..num_buckets`. The result is deterministic: it does not depend
+    /// on the number of threads or on the split granularity of the iterator.
+    /// Items are moved, not copied, so they do not need to be `Clone`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without publishing any partial result when:
+    ///
+    /// * `num_buckets` is zero (`BucketError::NoBuckets`),
+    /// * the classifier returns an index outside `0..num_buckets`
+    ///   (`BucketError::BucketOutOfRange`),
+    /// * a capacity computation overflows or an allocation fails
+    ///   (`BucketError::CapacityOverflow`).
+    ///
+    /// If the classifier panics, every item that was already produced is
+    /// dropped exactly once, and uninitialized output slots are never read
+    /// as values.
+    ///
+    /// # Complexity
+    ///
+    /// Let `n` be the number of items, `b` the number of buckets, and `p` the
+    /// number of parallel chunks (a small multiple of the thread count).
+    /// This performs `O(n + b * p)` work -- one parallel classification pass,
+    /// one parallel chunked counting pass, and one parallel scatter that
+    /// moves each item directly to its final position -- using `O(n + b * p)`
+    /// additional memory.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rayon::prelude::*;
+    ///
+    /// let buckets = (0..10)
+    ///     .into_par_iter()
+    ///     .partition_into_buckets(3, |x| x % 3)
+    ///     .unwrap();
+    ///
+    /// assert_eq!(buckets, [vec![0, 3, 6, 9], vec![1, 4, 7], vec![2, 5, 8]]);
+    /// ```
+    fn partition_into_buckets<F>(
+        self,
+        num_buckets: usize,
+        classify: F,
+    ) -> Result<Vec<Vec<Self::Item>>, BucketError>
+    where
+        F: Fn(&Self::Item) -> usize + Sync + Send,
+    {
+        buckets::partition_into_buckets(self, num_buckets, classify)
     }
 
     /// Iterates over tuples `(A, B)`, where the items `A` are from
