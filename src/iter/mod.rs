@@ -152,6 +152,7 @@ mod sum;
 mod take;
 mod take_any;
 mod take_any_while;
+mod try_collect;
 mod try_fold;
 mod try_reduce;
 mod try_reduce_with;
@@ -2531,6 +2532,50 @@ pub trait IndexedParallelIterator: ParallelIterator {
     /// ```
     fn collect_into_vec(self, target: &mut Vec<Self::Item>) {
         collect::collect_into_vec(self, target);
+    }
+    /// Collects the `Ok` values of a fallible iterator into a vector, keeping
+    /// the input order, or returns the error with the smallest input index.
+    ///
+    /// If every item is `Ok`, this returns `Ok(vec)` where `vec` holds the
+    /// values in their original input order. If any items are `Err`, this
+    /// returns `Err((index, error))` for the *smallest* failing input index,
+    /// regardless of which error happened to complete first.
+    ///
+    /// Once some index `k` is known to have failed, evaluation of items with
+    /// larger indices that have not started yet may be skipped, but every
+    /// index smaller than `k` is still evaluated, and items already in
+    /// progress are allowed to finish normally. This cancellation is only a
+    /// best-effort way to avoid unnecessary work: it does not guarantee that
+    /// any particular higher-index item will never be evaluated. Each input
+    /// is evaluated at most once, and no input is ever re-run to determine
+    /// the failing index.
+    ///
+    /// Panics in the iterator are propagated as usual, not wrapped in `Err`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rayon::prelude::*;
+    ///
+    /// let ok: Result<Vec<i32>, (usize, String)> = (0..5)
+    ///     .into_par_iter()
+    ///     .map(|i| Ok(i * 2))
+    ///     .try_collect();
+    /// assert_eq!(ok, Ok(vec![0, 2, 4, 6, 8]));
+    ///
+    /// let err: Result<Vec<i32>, (usize, String)> = (0..5)
+    ///     .into_par_iter()
+    ///     .map(|i| if i >= 2 { Err(format!("failed at {i}")) } else { Ok(i) })
+    ///     .try_collect();
+    /// assert_eq!(err, Err((2, String::from("failed at 2"))));
+    /// ```
+    fn try_collect<T, E>(self) -> Result<Vec<T>, (usize, E)>
+    where
+        Self: IndexedParallelIterator<Item = Result<T, E>>,
+        T: Send,
+        E: Send,
+    {
+        try_collect::try_collect(self)
     }
 
     /// Unzips the results of the iterator into the specified
