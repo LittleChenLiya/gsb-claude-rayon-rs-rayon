@@ -2914,6 +2914,108 @@ pub trait IndexedParallelIterator: ParallelIterator {
         ord == Some(Ordering::Equal) || ord == Some(Ordering::Greater)
     }
 
+    /// Executes a fallible `OP` on each item produced by the iterator, in
+    /// parallel, and collects the successful results into a vector.
+    ///
+    /// If every call succeeds, this returns `Ok` with a vector of the
+    /// results in their original input order, just like `collect()`.
+    ///
+    /// If any calls fail, this returns `Err((index, error))` with the
+    /// **lowest failing input index** and that call's error. This is unlike
+    /// collecting an iterator of `Result`s (or using `try_for_each()`),
+    /// where parallel short-circuiting may report whichever error happened to
+    /// finish first. Here, an error at an earlier input position always wins,
+    /// even if it completes after an error at a later position.
+    ///
+    /// Once an error at index `k` has been observed, inputs with indices
+    /// greater than `k` that have not started yet may be skipped, but every
+    /// input with an index less than `k` is still evaluated, since it could
+    /// produce an even earlier error. Work that has already started always
+    /// runs to completion; nothing is killed mid-flight. This cancellation is
+    /// only a best-effort way to avoid unnecessary work: it does **not**
+    /// guarantee that higher-indexed inputs will never be evaluated.
+    ///
+    /// Each input is evaluated at most once, and the error type does not need
+    /// to be `Clone`. As usual in rayon, if `OP` panics, the panic is
+    /// propagated to the caller rather than being wrapped in an `Err`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rayon::prelude::*;
+    ///
+    /// let result: Result<Vec<i32>, (usize, i32)> = (0..10)
+    ///     .into_par_iter()
+    ///     .try_collect_ordered(|x| {
+    ///         if x == 2 || x == 7 {
+    ///             Err(x)
+    ///         } else {
+    ///             Ok(x * 10)
+    ///         }
+    ///     });
+    ///
+    /// // The error at index 2 is always reported, never the one at index 7,
+    /// // no matter which one happened to complete first.
+    /// assert_eq!(result, Err((2, 2)));
+    /// ```
+    ///
+    /// ```
+    /// use rayon::prelude::*;
+    ///
+    /// let result: Result<Vec<i32>, (usize, i32)> = (0..5)
+    ///     .into_par_iter()
+    ///     .try_collect_ordered(|x| Ok(x * x));
+    ///
+    /// assert_eq!(result, Ok(vec![0, 1, 4, 9, 16]));
+    /// ```
+    fn try_collect_ordered<OP, T, E>(self, op: OP) -> Result<Vec<T>, (usize, E)>
+    where
+        OP: Fn(Self::Item) -> Result<T, E> + Sync + Send,
+        T: Send,
+        E: Send,
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        enum Slot<T, E> {
+            Value(T),
+            Failed(E),
+            Skipped,
+        }
+
+        // The lowest input index known to have failed so far.
+        let best_error = &AtomicUsize::new(usize::MAX);
+
+        let slots: Vec<Slot<T, E>> = self
+            .enumerate()
+            .map(|(index, item)| {
+                // Inputs before the best known error still need a verdict,
+                // but anything past it is allowed to be skipped.
+                if best_error.load(Ordering::Acquire) < index {
+                    return Slot::Skipped;
+                }
+                match op(item) {
+                    Ok(value) => Slot::Value(value),
+                    Err(error) => {
+                        best_error.fetch_min(index, Ordering::AcqRel);
+                        Slot::Failed(error)
+                    }
+                }
+            })
+            .collect();
+
+        // The slots are in input order, so the first failure in the vector
+        // has the lowest failing index, no matter when it completed.
+        let mut values = Vec::with_capacity(slots.len());
+        for slot in slots {
+            match slot {
+                Slot::Value(value) => values.push(value),
+                Slot::Failed(error) => return Err((values.len(), error)),
+                Slot::Skipped => unreachable!("skipped inputs always follow a failure"),
+            }
+        }
+        Ok(values)
+    }
+
     /// Yields an index along with each item.
     ///
     /// # Examples
