@@ -116,6 +116,17 @@ fn clone_vec() {
     check(v.par_rchunks_exact(42));
     check(v.par_windows(42));
     check(v.par_array_windows::<42>());
+    check(v.par_map_windows(
+        2,
+        3,
+        rayon::slice::WindowBoundary::Truncate,
+        |w: &[i32], _| w.len(),
+    ));
+    check(
+        v.par_map_windows(2, 3, rayon::slice::WindowBoundary::Skip, |w: &[i32], _| {
+            w.len()
+        }),
+    );
     check(v.par_split(|x| x % 3 == 0));
     check(v.par_split_inclusive(|x| x % 3 == 0));
     check(v.into_par_iter());

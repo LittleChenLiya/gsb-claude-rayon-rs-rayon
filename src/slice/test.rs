@@ -214,3 +214,173 @@ fn slice_chunk_by_mut() {
         .collect();
     assert_eq!(par, seq);
 }
+
+use crate::slice::WindowBoundary;
+
+/// Sequential reference for par_map_windows, returning for each produced
+/// center its original index, its position in the window, the window
+/// contents, and the window sum.
+fn map_windows_reference(
+    data: &[i32],
+    left: usize,
+    right: usize,
+    boundary: WindowBoundary,
+) -> Vec<(usize, usize, Vec<i32>, i32)> {
+    let n = data.len();
+    let centers: Vec<usize> = match boundary {
+        WindowBoundary::Truncate => (0..n).collect(),
+        WindowBoundary::Skip => (left..n.saturating_sub(right)).collect(),
+    };
+    centers
+        .into_iter()
+        .map(|c| {
+            let start = c.saturating_sub(left);
+            let end = Ord::min(n, c + right + 1);
+            let window: Vec<i32> = data[start..end].to_vec();
+            let sum = window.iter().sum();
+            (c, c - start, window, sum)
+        })
+        .collect()
+}
+
+#[test]
+fn par_map_windows_truncate() {
+    let data = [1, 2, 3, 4];
+    let sums: Vec<i32> = data
+        .par_map_windows(1, 1, WindowBoundary::Truncate, |w, _| w.iter().sum())
+        .collect();
+    assert_eq!(sums, [3, 6, 9, 7]);
+
+    let details: Vec<(Vec<i32>, usize, usize)> = data
+        .par_map_windows(1, 1, WindowBoundary::Truncate, |w, c| {
+            (w.to_vec(), c.index, c.position)
+        })
+        .collect();
+    assert_eq!(
+        details,
+        [
+            (vec![1, 2], 0, 0),
+            (vec![1, 2, 3], 1, 1),
+            (vec![2, 3, 4], 2, 1),
+            (vec![3, 4], 3, 1),
+        ]
+    );
+}
+
+#[test]
+fn par_map_windows_skip() {
+    let data = [1, 2, 3, 4];
+    let sums: Vec<i32> = data
+        .par_map_windows(1, 1, WindowBoundary::Skip, |w, _| w.iter().sum())
+        .collect();
+    assert_eq!(sums, [6, 9]);
+
+    // Center indices come from the original slice and are not renumbered.
+    let indices: Vec<usize> = data
+        .par_map_windows(1, 1, WindowBoundary::Skip, |_, c| c.index)
+        .collect();
+    assert_eq!(indices, [1, 2]);
+
+    let details: Vec<(Vec<i32>, usize)> = data
+        .par_map_windows(1, 1, WindowBoundary::Skip, |w, c| (w.to_vec(), c.position))
+        .collect();
+    assert_eq!(details, [(vec![1, 2, 3], 1), (vec![2, 3, 4], 1)]);
+}
+
+#[test]
+fn par_map_windows_empty() {
+    let data: [i32; 0] = [];
+    for boundary in [WindowBoundary::Truncate, WindowBoundary::Skip] {
+        let calls = AtomicUsize::new(0);
+        let out: Vec<i32> = data
+            .par_map_windows(1, 1, boundary, |w: &[i32], _| {
+                calls.fetch_add(1, Relaxed);
+                w.iter().sum()
+            })
+            .collect();
+        assert!(out.is_empty());
+        assert_eq!(calls.load(Relaxed), 0);
+    }
+}
+
+#[test]
+fn par_map_windows_matches_sequential_across_threads() {
+    let data: Vec<i32> = (0..1000).map(|i| i * 7 % 13 - 6).collect();
+    for threads in [1, 2, 4] {
+        let pool = crate::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        for boundary in [WindowBoundary::Truncate, WindowBoundary::Skip] {
+            for &(left, right) in &[(0usize, 0usize), (1, 1), (3, 2), (2000, 2000)] {
+                let expected = map_windows_reference(&data, left, right, boundary);
+                let calls = AtomicUsize::new(0);
+                let seen = std::sync::Mutex::new(Vec::new());
+                let actual: Vec<(usize, usize, Vec<i32>, i32)> = pool.install(|| {
+                    data.par_map_windows(left, right, boundary, |window, center| {
+                        calls.fetch_add(1, Relaxed);
+                        seen.lock().unwrap().push(center.index);
+                        assert_eq!(window[center.position], data[center.index]);
+                        (
+                            center.index,
+                            center.position,
+                            window.to_vec(),
+                            window.iter().sum(),
+                        )
+                    })
+                    // Force fine-grained splits to exercise halo exchange
+                    // across chunk boundaries.
+                    .with_max_len(1)
+                    .collect()
+                });
+                // Exactly one call per center, in stable center-index order.
+                assert_eq!(calls.load(Relaxed), expected.len());
+                assert_eq!(actual, expected);
+                let mut seen = seen.into_inner().unwrap();
+                seen.sort_unstable();
+                seen.dedup();
+                assert_eq!(seen.len(), expected.len());
+            }
+        }
+    }
+}
+
+#[test]
+fn par_map_windows_non_clone_elements() {
+    struct NoClone(i32);
+
+    let data: Vec<NoClone> = (0..10).map(NoClone).collect();
+    let sums: Vec<i32> = data
+        .par_map_windows(2, 2, WindowBoundary::Truncate, |w, _| {
+            w.iter().map(|x| x.0).sum()
+        })
+        .collect();
+    let expected: Vec<i32> = (0..10i32)
+        .map(|c| {
+            let start = Ord::max(c - 2, 0);
+            let end = Ord::min(c + 3, 10);
+            (start..end).sum()
+        })
+        .collect();
+    assert_eq!(sums, expected);
+}
+
+#[test]
+#[should_panic(expected = "left + right neighborhood width overflowed")]
+fn par_map_windows_width_overflow() {
+    let data = [1, 2, 3];
+    let _ = data.par_map_windows(usize::MAX, 1, WindowBoundary::Truncate, |w, _| w.len());
+}
+
+#[test]
+#[should_panic(expected = "boom")]
+fn par_map_windows_panic_propagates() {
+    let data: Vec<i32> = (0..1000).collect();
+    data.par_map_windows(1, 1, WindowBoundary::Truncate, |_, c| {
+        if c.index == 500 {
+            panic!("boom")
+        }
+        c.index
+    })
+    .for_each(|_| {});
+}

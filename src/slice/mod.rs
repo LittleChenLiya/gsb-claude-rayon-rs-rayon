@@ -7,6 +7,7 @@
 
 mod chunk_by;
 mod chunks;
+mod map_windows;
 mod rchunks;
 mod sort;
 mod windows;
@@ -24,6 +25,7 @@ use std::fmt::{self, Debug};
 
 pub use self::chunk_by::{ChunkBy, ChunkByMut};
 pub use self::chunks::{Chunks, ChunksExact, ChunksExactMut, ChunksMut};
+pub use self::map_windows::{MapWindows, WindowBoundary, WindowCenter};
 pub use self::rchunks::{RChunks, RChunksExact, RChunksExactMut, RChunksMut};
 pub use self::windows::{ArrayWindows, Windows};
 
@@ -105,6 +107,90 @@ pub trait ParallelSlice<T: Sync> {
     /// ```
     fn par_array_windows<const N: usize>(&self) -> ArrayWindows<'_, T, N> {
         ArrayWindows::new(self.as_parallel_slice())
+    }
+
+    /// Returns a parallel iterator that maps each element of the slice (the
+    /// "center") to one output computed from a read-only window of its
+    /// neighborhood, taking up to `left` elements before and `right`
+    /// elements after the center.
+    ///
+    /// The closure receives the window as a shared subslice of the original
+    /// slice together with a [`WindowCenter`] describing the center: its
+    /// `index` in the original slice (never renumbered, even when boundary
+    /// centers are skipped) and its `position` within the window, so
+    /// `window[center.position]` is always the center element. The outputs
+    /// are indexed by center, so collecting this iterator yields them in
+    /// stable center-index order.
+    ///
+    /// The `boundary` policy selects the behavior for centers too close to
+    /// an edge for a complete neighborhood:
+    ///
+    /// - [`WindowBoundary::Truncate`] clamps windows at the slice ends, so
+    ///   every element produces exactly one output and edge windows are
+    ///   shorter.
+    /// - [`WindowBoundary::Skip`] produces no output for such centers, so
+    ///   every window the closure sees has the full `left + 1 + right`
+    ///   elements, and the first output is centered at index `left`.
+    ///
+    /// The input is never cloned and no per-window allocation is performed:
+    /// each job works directly on a halo-extended subslice of the original
+    /// data, so elements only need to be [`Sync`], not [`Clone`].
+    ///
+    /// # Lifetimes
+    ///
+    /// The window passed to the closure borrows directly from the original
+    /// slice with its lifetime (`'data` on [`MapWindows`]); it is not a
+    /// temporary copy, so it may be stashed or sent elsewhere as long as the
+    /// original slice outlives it. The closure itself is shared by reference
+    /// across threads, hence the [`Sync`] bound.
+    ///
+    /// # Complexity
+    ///
+    /// Constructing the iterator is O(1). Driving it to completion calls the
+    /// closure exactly once per produced center — `len` centers for
+    /// `Truncate`, `len.saturating_sub(left + right)` for `Skip` — for
+    /// a total of O(len) closure calls and O(len) output space, plus O(1)
+    /// auxiliary space per split. Each closure call receives a window of at
+    /// most `left + 1 + right` elements in O(1) time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `left + right` overflows `usize`. Panics from the
+    /// closure are propagated to the caller through the usual panic
+    /// mechanism of parallel iterators.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rayon::prelude::*;
+    /// use rayon::slice::WindowBoundary;
+    ///
+    /// let data = [1, 2, 3, 4];
+    /// let sums: Vec<i32> = data
+    ///     .par_map_windows(1, 1, WindowBoundary::Truncate, |window, center| {
+    ///         assert_eq!(window[center.position], data[center.index]);
+    ///         window.iter().sum()
+    ///     })
+    ///     .collect();
+    /// assert_eq!(sums, [3, 6, 9, 7]);
+    ///
+    /// let sums: Vec<i32> = data
+    ///     .par_map_windows(1, 1, WindowBoundary::Skip, |window, _| window.iter().sum())
+    ///     .collect();
+    /// assert_eq!(sums, [6, 9]);
+    /// ```
+    fn par_map_windows<R, F>(
+        &self,
+        left: usize,
+        right: usize,
+        boundary: WindowBoundary,
+        map_op: F,
+    ) -> MapWindows<'_, T, F>
+    where
+        R: Send,
+        F: Fn(&[T], WindowCenter) -> R + Sync + Send,
+    {
+        MapWindows::new(self.as_parallel_slice(), left, right, boundary, map_op)
     }
 
     /// Returns a parallel iterator over at most `chunk_size` elements of
