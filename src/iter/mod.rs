@@ -152,6 +152,7 @@ mod sum;
 mod take;
 mod take_any;
 mod take_any_while;
+mod top_k;
 mod try_fold;
 mod try_reduce;
 mod try_reduce_with;
@@ -2531,6 +2532,45 @@ pub trait IndexedParallelIterator: ParallelIterator {
     /// ```
     fn collect_into_vec(self, target: &mut Vec<Self::Item>) {
         collect::collect_into_vec(self, target);
+    }
+
+    /// Returns the `k` best-ranked elements of the iterator, sorted by rank,
+    /// without collecting and sorting the whole iterator first.
+    ///
+    /// The ranking is defined by the `compare` function, exactly like
+    /// [`slice::sort_by`]: the result is the same as stably sorting all
+    /// elements with `compare` and keeping the first `k` of them. Elements
+    /// that compare equal keep their original input order (stability), and if
+    /// `k` is greater than the length, the whole iterator is returned in
+    /// ranked order. If `k` is zero, the iterator is not driven at all, so
+    /// no upstream work (e.g. `map` closures) is executed.
+    ///
+    /// Each parallel work segment only retains a bounded candidate set of at
+    /// most `k` elements, tagged with the original indices, and those sets
+    /// are merged pairwise. Peak memory therefore grows with the number of
+    /// work segments times `k`, not with the total input length, and the
+    /// result is identical no matter how many threads are used.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rayon::prelude::*;
+    ///
+    /// let v = [5, 1, 4, 2, 3];
+    ///
+    /// // the three smallest elements, in ascending order
+    /// let top = v.par_iter().copied().top_k(3, Ord::cmp);
+    /// assert_eq!(top, [1, 2, 3]);
+    ///
+    /// // a reversed comparator keeps the greatest elements instead
+    /// let bottom = v.par_iter().copied().top_k(2, |a, b| b.cmp(a));
+    /// assert_eq!(bottom, [5, 4]);
+    /// ```
+    fn top_k<F>(self, k: usize, compare: F) -> Vec<Self::Item>
+    where
+        F: Fn(&Self::Item, &Self::Item) -> Ordering + Sync,
+    {
+        top_k::top_k(self, k, compare)
     }
 
     /// Unzips the results of the iterator into the specified
