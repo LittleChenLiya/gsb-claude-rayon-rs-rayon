@@ -1,3 +1,11 @@
+# Release rayon 1.13.0 (unreleased)
+
+- The new methods `IndexedParallelIterator::tree_reduce` and
+  `tree_reduce_with` reduce items in a fixed binary tree built solely from
+  the input indices: every segment is split at its midpoint, and the halves
+  are combined left-to-right. The evaluation order (and thus, for example,
+  floating-point results) is independent of the number of worker threads.
+
 # Release rayon 1.12.0 (2026-04-13)
 
 - Fixed a bug in parallel `Range<char>` when the end is 0xE000, just past the

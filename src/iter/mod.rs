@@ -152,6 +152,7 @@ mod sum;
 mod take;
 mod take_any;
 mod take_any_while;
+mod tree_reduce;
 mod try_fold;
 mod try_reduce;
 mod try_reduce_with;
@@ -3201,6 +3202,64 @@ pub trait IndexedParallelIterator: ParallelIterator {
     /// ```
     fn with_max_len(self, max: usize) -> MaxLen<Self> {
         MaxLen::new(self, max)
+    }
+
+    /// Reduces the items in the iterator into one item using `op`, combining
+    /// them in a fixed binary tree determined solely by their indices.
+    /// If the iterator is empty, `identity()` is returned.
+    ///
+    /// Each segment is split at its midpoint (`len / 2`), and the reduced
+    /// results of the left and right halves are combined with `op(left,
+    /// right)`, so the leaves keep their original order. Unlike
+    /// [`reduce()`][ParallelIterator::reduce], this tree never depends on the
+    /// number of worker threads or on work-stealing scheduling: threads only
+    /// affect where and when the fixed subtasks run. The result is therefore
+    /// bit-for-bit reproducible for operations whose result depends on the
+    /// evaluation order, such as floating-point addition.
+    ///
+    /// `identity()` is only called for an empty iterator, so unlike
+    /// [`reduce()`][ParallelIterator::reduce] it is not required to be a true
+    /// algebraic identity.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rayon::prelude::*;
+    ///
+    /// let values = [1.0, 1.0e16, 1.0, -1.0e16];
+    /// let sum = values.par_iter().copied().tree_reduce(|| 0.0, |a, b| a + b);
+    /// assert_eq!(sum, values.iter().sum::<f64>());
+    /// ```
+    fn tree_reduce<OP, ID>(self, identity: ID, op: OP) -> Self::Item
+    where
+        OP: Fn(Self::Item, Self::Item) -> Self::Item + Sync + Send,
+        ID: FnOnce() -> Self::Item,
+    {
+        tree_reduce::tree_reduce_with_identity(self, identity, op)
+    }
+
+    /// Reduces the items in the iterator into one item using `op` with the
+    /// same fixed, index-based binary tree as
+    /// [`tree_reduce()`][IndexedParallelIterator::tree_reduce]. If the
+    /// iterator is empty, `None` is returned; otherwise, `Some` is returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rayon::prelude::*;
+    ///
+    /// let values = [1.0, 1.0e16, 1.0, -1.0e16];
+    /// let sum = values.par_iter().copied().tree_reduce_with(|a, b| a + b).unwrap();
+    /// assert_eq!(sum, values.iter().sum::<f64>());
+    ///
+    /// assert_eq!(Option::<f64>::None,
+    ///            [].par_iter().copied().tree_reduce_with(|a, b| a + b));
+    /// ```
+    fn tree_reduce_with<OP>(self, op: OP) -> Option<Self::Item>
+    where
+        OP: Fn(Self::Item, Self::Item) -> Self::Item + Sync + Send,
+    {
+        tree_reduce::tree_reduce(self, op)
     }
 
     /// Produces an exact count of how many items this iterator will
