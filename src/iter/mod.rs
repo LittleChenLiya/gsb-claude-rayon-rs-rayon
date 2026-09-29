@@ -152,6 +152,7 @@ mod sum;
 mod take;
 mod take_any;
 mod take_any_while;
+mod top_k;
 mod try_fold;
 mod try_reduce;
 mod try_reduce_with;
@@ -2561,6 +2562,67 @@ pub trait IndexedParallelIterator: ParallelIterator {
         B: Send,
     {
         collect::unzip_into_vecs(self, left, right);
+    }
+
+    /// Returns the `k` best items of the iterator according to the
+    /// given comparison function, sorted by their final rank.
+    ///
+    /// This is a *stable* selection: items that compare equal are
+    /// ordered by their original position in the iterator, matching
+    /// the result of collecting everything, sorting stably with the
+    /// same comparison function, and keeping the first `k` items.
+    /// The result is deterministic for any number of threads.
+    ///
+    /// If `k` is greater than or equal to the length of the iterator,
+    /// all items are returned in sorted order. If `k` is zero, an
+    /// empty vector is returned and the iterator is not driven at
+    /// all, so no upstream closures are executed.
+    ///
+    /// Each work segment only retains a bounded candidate set of at
+    /// most `k` items, so peak memory grows with the number of work
+    /// segments times `k` rather than with the total input length.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rayon::prelude::*;
+    ///
+    /// // The three smallest values, in ascending order.
+    /// let v = vec![5, 1, 4, 2, 3];
+    /// let top = v.par_iter().top_k_by(3, |a, b| a.cmp(b));
+    /// assert_eq!(top, [&1, &2, &3]);
+    ///
+    /// // The three largest values, in descending order.
+    /// let top = v.par_iter().top_k_by(3, |a, b| b.cmp(a));
+    /// assert_eq!(top, [&5, &4, &3]);
+    /// ```
+    fn top_k_by<F>(self, k: usize, compare: F) -> Vec<Self::Item>
+    where
+        F: Fn(&Self::Item, &Self::Item) -> Ordering + Sync + Send,
+    {
+        top_k::top_k_by(self, k, compare)
+    }
+
+    /// Returns the `k` smallest items of the iterator, sorted in
+    /// ascending order.
+    ///
+    /// This is equivalent to `top_k_by(k, Ord::cmp)`; see that
+    /// method for details on stability and memory usage.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rayon::prelude::*;
+    ///
+    /// let v = vec![5, 1, 4, 2, 3];
+    /// let top = v.par_iter().top_k(3);
+    /// assert_eq!(top, [&1, &2, &3]);
+    /// ```
+    fn top_k(self, k: usize) -> Vec<Self::Item>
+    where
+        Self::Item: Ord,
+    {
+        top_k::top_k_by(self, k, Ord::cmp)
     }
 
     /// Iterates over tuples `(A, B)`, where the items `A` are from

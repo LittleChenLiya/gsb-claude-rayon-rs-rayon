@@ -1,3 +1,10 @@
+# Unreleased
+
+- The new methods `IndexedParallelIterator::top_k` and
+- `IndexedParallelIterator::top_k_by` select the best `k` items with a
+- stable ordering, using bounded per-segment candidate sets instead of
+- collecting and sorting the entire input.
+
 # Release rayon 1.12.0 (2026-04-13)
 
 - Fixed a bug in parallel `Range<char>` when the end is 0xE000, just past the
