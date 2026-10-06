@@ -143,6 +143,7 @@ mod product;
 mod reduce;
 mod repeat;
 mod rev;
+mod segmented_scan;
 mod skip;
 mod skip_any;
 mod skip_any_while;
@@ -193,6 +194,7 @@ pub use self::{
     positions::Positions,
     repeat::{Repeat, RepeatN, repeat, repeat_n},
     rev::Rev,
+    segmented_scan::SegmentedScan,
     skip::Skip,
     skip_any::SkipAny,
     skip_any_while::SkipAnyWhile,
@@ -2931,6 +2933,44 @@ pub trait IndexedParallelIterator: ParallelIterator {
     /// ```
     fn enumerate(self) -> Enumerate<Self> {
         Enumerate::new(self)
+    }
+
+    /// Performs an inclusive segmented prefix scan.
+    ///
+    /// Each item is a `(value, is_segment_start)` pair. Whenever
+    /// `is_segment_start` is true, that item begins a new segment; the very
+    /// first item implicitly begins a segment as well, even if its marker is
+    /// false. For every item, this iterator yields the combination of its
+    /// segment from the segment start up to and including that item, using
+    /// the associative operation `op` with `identity` as its unit.
+    ///
+    /// The operation does not need to be commutative: the original
+    /// left-to-right order of the items is always preserved, so `op` is
+    /// only ever applied with the earlier element on the left.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rayon::prelude::*;
+    ///
+    /// let values = vec![1, 2, 3, 4, 5];
+    /// let starts = vec![true, false, true, false, false];
+    ///
+    /// let scanned: Vec<i32> = values
+    ///     .into_par_iter()
+    ///     .zip(starts)
+    ///     .segmented_scan(0, |a, b| a + b)
+    ///     .collect();
+    ///
+    /// assert_eq!(scanned, [1, 3, 3, 7, 12]);
+    /// ```
+    fn segmented_scan<T, F>(self, identity: T, op: F) -> SegmentedScan<Self, T, F>
+    where
+        Self: IndexedParallelIterator<Item = (T, bool)>,
+        T: Clone + Send,
+        F: Fn(&T, &T) -> T + Sync + Send,
+    {
+        SegmentedScan::new(self, identity, op)
     }
 
     /// Creates an iterator that steps by the given amount
