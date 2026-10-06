@@ -2377,3 +2377,166 @@ fn blocks() {
     assert!(m.is_sorted());
     assert_eq!(v.len(), 1000);
 }
+
+/// Serial reference implementation of segmented inclusive scan.
+fn serial_segmented_scan(values: &[i64], flags: &[bool]) -> Vec<i64> {
+    let mut acc = 0;
+    let mut out = Vec::with_capacity(values.len());
+    for (&value, &flag) in values.iter().zip(flags) {
+        if flag {
+            acc = 0;
+        }
+        acc += value;
+        out.push(acc);
+    }
+    out
+}
+
+#[test]
+fn segmented_scan_basic() {
+    // The example from the method docs: flags restart the running sum.
+    let values = vec![1, 2, 3, 4, 5];
+    let flags = vec![true, false, true, false, false];
+    let scanned: Vec<i32> = values
+        .into_par_iter()
+        .segmented_scan(flags.into_par_iter(), 0, |a, b| a + b)
+        .collect();
+    assert_eq!(scanned, vec![1, 3, 3, 7, 12]);
+}
+
+#[test]
+fn segmented_scan_first_element_implicitly_starts_segment() {
+    // A `false` flag on the very first element must not change anything:
+    // the first element always opens a segment of its own.
+    for first_flag in [false, true] {
+        let values = vec![10, 1, 1];
+        let flags = vec![first_flag, false, true];
+        let scanned: Vec<i32> = values
+            .into_par_iter()
+            .segmented_scan(flags.into_par_iter(), 0, |a, b| a + b)
+            .collect();
+        assert_eq!(scanned, vec![10, 11, 1]);
+    }
+}
+
+#[test]
+fn segmented_scan_empty_and_singleton() {
+    let scanned: Vec<i32> = Vec::<i32>::new()
+        .into_par_iter()
+        .segmented_scan(Vec::<bool>::new().into_par_iter(), 0, |a, b| a + b)
+        .collect();
+    assert_eq!(scanned, Vec::<i32>::new());
+
+    let scanned: Vec<i32> = vec![42]
+        .into_par_iter()
+        .segmented_scan(vec![false].into_par_iter(), 0, |a, b| a + b)
+        .collect();
+    assert_eq!(scanned, vec![42]);
+}
+
+#[test]
+fn segmented_scan_noncommutative() {
+    // String concatenation is associative but not commutative, so any
+    // operand-order mix-up across chunk boundaries would show up here.
+    let values: Vec<String> = (0u32..1000).map(|i| i.to_string()).collect();
+    let flags: Vec<bool> = (0..1000).map(|i| i % 7 == 3).collect();
+
+    let scanned: Vec<String> = values
+        .clone()
+        .into_par_iter()
+        .segmented_scan(flags.clone().into_par_iter(), String::new(), |mut a, b| {
+            a.push_str(&b);
+            a
+        })
+        .collect();
+
+    // Serial reference with the same left-to-right concatenation order.
+    let mut expected = Vec::with_capacity(values.len());
+    let mut acc = String::new();
+    for (value, &flag) in values.iter().zip(&flags) {
+        if flag {
+            acc.clear();
+        }
+        acc.push_str(value);
+        expected.push(acc.clone());
+    }
+    assert_eq!(scanned, expected);
+}
+
+#[test]
+fn segmented_scan_chunk_sizes_match_serial() {
+    // Run the parallel chunk-stitching scan directly with many different
+    // chunk sizes, so segment prefixes are checked across chunk boundaries
+    // (including segments that span many chunks, and chunks with no flag).
+    let mut rng = seeded_rng();
+    for &len in &[1usize, 2, 3, 10, 63, 64, 65, 1000, 1027] {
+        let values: Vec<i64> = (&mut rng)
+            .sample_iter(&StandardUniform)
+            .take(len)
+            .map(|x: i32| i64::from(x) % 100)
+            .collect();
+        let flags: Vec<bool> = (&mut rng)
+            .sample_iter(&StandardUniform)
+            .take(len)
+            .map(|x: i32| x % 5 == 0)
+            .collect();
+        let expected = serial_segmented_scan(&values, &flags);
+
+        for &chunk_size in &[0usize, 1, 2, 3, 7, 64, 1000, len, len + 1] {
+            let mut data: Vec<(i64, bool)> =
+                values.iter().copied().zip(flags.iter().copied()).collect();
+            super::segmented_scan::scan(&mut data, &0, &|a: i64, b: i64| a + b, chunk_size);
+            let scanned: Vec<i64> = data.into_iter().map(|(value, _)| value).collect();
+            assert_eq!(
+                scanned, expected,
+                "len={len} chunk_size={chunk_size} values={values:?} flags={flags:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn segmented_scan_thread_pools_match_serial() {
+    // Compare the public parallel iterator against the serial reference
+    // with 1, 2, and 4 threads, so cross-chunk carries are verified under
+    // different amounts of actual parallelism.
+    let mut rng = seeded_rng();
+    let len = 10_000;
+    let values: Vec<i64> = (&mut rng)
+        .sample_iter(&StandardUniform)
+        .take(len)
+        .map(|x: i32| i64::from(x) % 100)
+        .collect();
+    let flags: Vec<bool> = (&mut rng)
+        .sample_iter(&StandardUniform)
+        .take(len)
+        .map(|x: i32| x % 13 == 0)
+        .collect();
+    let expected = serial_segmented_scan(&values, &flags);
+
+    for num_threads in [1, 2, 4] {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap();
+        let scanned: Vec<i64> = pool.install(|| {
+            values
+                .par_iter()
+                .copied()
+                .segmented_scan(flags.par_iter().copied(), 0, |a, b| a + b)
+                .collect()
+        });
+        assert_eq!(scanned, expected, "num_threads={num_threads}");
+    }
+}
+
+#[test]
+#[should_panic(expected = "iterators must have the same length")]
+fn segmented_scan_flags_length_mismatch() {
+    let values = vec![1, 2, 3];
+    let flags = vec![true, false];
+    let _: Vec<i32> = values
+        .into_par_iter()
+        .segmented_scan(flags.into_par_iter(), 0, |a, b| a + b)
+        .collect();
+}

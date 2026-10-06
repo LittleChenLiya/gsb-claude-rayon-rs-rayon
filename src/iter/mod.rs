@@ -143,6 +143,7 @@ mod product;
 mod reduce;
 mod repeat;
 mod rev;
+mod segmented_scan;
 mod skip;
 mod skip_any;
 mod skip_any_while;
@@ -193,6 +194,7 @@ pub use self::{
     positions::Positions,
     repeat::{Repeat, RepeatN, repeat, repeat_n},
     rev::Rev,
+    segmented_scan::SegmentedScan,
     skip::Skip,
     skip_any::SkipAny,
     skip_any_while::SkipAnyWhile,
@@ -2769,6 +2771,68 @@ pub trait IndexedParallelIterator: ParallelIterator {
     {
         assert!(chunk_size != 0, "chunk_size must not be zero");
         FoldChunksWith::new(self, chunk_size, init, fold_op)
+    }
+
+    /// Computes an inclusive prefix scan that resets at the start of every
+    /// segment, in parallel.
+    ///
+    /// The `flags` iterator must have the same length as `self` and marks the
+    /// first element of every segment with `true`. The very first element
+    /// implicitly starts a new segment, so its flag is irrelevant. Every
+    /// element is replaced by the combination of its segment up to and
+    /// including itself, using the associative `scan_op` and its `identity`
+    /// element.
+    ///
+    /// `scan_op` does not need to be commutative: the left-to-right order of
+    /// the operands is always preserved, so operations like string
+    /// concatenation scan correctly.
+    ///
+    /// **Panics** if `flags` does not have the same length as `self`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rayon::prelude::*;
+    ///
+    /// let values = vec![1, 2, 3, 4, 5];
+    /// let segment_starts = vec![true, false, true, false, false];
+    /// let scanned: Vec<i32> = values
+    ///     .into_par_iter()
+    ///     .segmented_scan(segment_starts.into_par_iter(), 0, |a, b| a + b)
+    ///     .collect();
+    /// assert_eq!(scanned, vec![1, 3, 3, 7, 12]);
+    /// ```
+    ///
+    /// The operand order is preserved for non-commutative operations:
+    ///
+    /// ```
+    /// use rayon::prelude::*;
+    ///
+    /// let values = vec!["a", "b", "c", "d"];
+    /// let segment_starts = vec![true, false, true, false];
+    /// let scanned: Vec<String> = values
+    ///     .into_par_iter()
+    ///     .map(str::to_owned)
+    ///     .segmented_scan(segment_starts.into_par_iter(), String::new(), |mut a, b| {
+    ///         a.push_str(&b);
+    ///         a
+    ///     })
+    ///     .collect();
+    /// assert_eq!(scanned, vec!["a", "ab", "c", "cd"]);
+    /// ```
+    fn segmented_scan<F, T, OP>(
+        self,
+        flags: F,
+        identity: T,
+        scan_op: OP,
+    ) -> SegmentedScan<Self, F, T, OP>
+    where
+        F: IndexedParallelIterator<Item = bool>,
+        T: Clone + Send + Sync,
+        OP: Fn(T, T) -> T + Sync + Send,
+        Self: IndexedParallelIterator<Item = T>,
+    {
+        SegmentedScan::new(self, flags, identity, scan_op)
     }
 
     /// Lexicographically compares the elements of this `ParallelIterator` with those of

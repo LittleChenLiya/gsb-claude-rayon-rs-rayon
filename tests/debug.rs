@@ -180,6 +180,10 @@ fn debug_adaptors() {
     check(v.par_iter().panic_fuse());
     check(v.par_iter().positions(|_| true));
     check(v.par_iter().rev());
+    check(
+        v.par_iter()
+            .segmented_scan(v.par_iter().map(|_| true), &0, |a, _| a),
+    );
     check(v.par_iter().skip(1));
     check(v.par_iter().skip_any(1));
     check(v.par_iter().skip_any_while(|_| false));
